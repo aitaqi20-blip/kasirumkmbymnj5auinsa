@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Kasir UMKM</title>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
 <style>
   :root{
     --navy:#0f2748;
@@ -32,7 +34,7 @@
   input,select,textarea{font-family:inherit;}
 
   /* ---------- App shell ---------- */
-  #app{display:flex;min-height:100vh;}
+  #app, #appAdmin{display:flex;min-height:100vh;}
 
   .sidebar{
     width:220px;flex-shrink:0;
@@ -920,6 +922,23 @@
 
 <script>
 /* ============================================================
+   FIREBASE (realtime storage)
+============================================================ */
+const firebaseConfig = {
+  apiKey: "AIzaSyACpjOqv_ccVWUKEUV6nCuL7A0q1WscJn4",
+  authDomain: "kasir-umkm-by-mnj5a-uinsa.firebaseapp.com",
+  projectId: "kasir-umkm-by-mnj5a-uinsa",
+  storageBucket: "kasir-umkm-by-mnj5a-uinsa.firebasestorage.app",
+  messagingSenderId: "58657123888",
+  appId: "1:58657123888:web:e695eafd8fa45f1feb07f5",
+  measurementId: "G-JHZ6QYBVWQ"
+};
+firebase.initializeApp(firebaseConfig);
+const fsdb = firebase.firestore();
+// Cache offline: kalau koneksi putus, app tetap bisa dibuka & baca data terakhir
+try{ fsdb.enablePersistence({ synchronizeTabs:true }); }catch(e){ /* sudah aktif di tab lain / browser tak dukung, abaikan */ }
+
+/* ============================================================
    STORAGE
 ============================================================ */
 // Kunci global (tidak tergantung UMKM mana yang login)
@@ -927,15 +946,59 @@ const GLOBAL_KEYS = { brand:'kasir_brand', adminCred:'kasir_admin_cred', umkms:'
 // Kunci data per-UMKM, di-set ulang isinya (bukan namanya) saat UMKM aktif berganti lewat setDbKeysForUmkm()
 const DB_KEYS = { products:'kasir_products', categories:'kasir_categories', trx:'kasir_trx', settings:'kasir_settings' };
 
+// Semua data (kecuali sesi login) disimpan di Firestore, koleksi "kv", 1 dokumen per key.
+// localStorage tetap dipakai sebagai cache lokal supaya UI tetap responsif & bisa dibaca instan/offline.
+function kvDoc(key){ return fsdb.collection('kv').doc(key); }
+
 function loadDB(key, fallback){
   try{
     const raw = localStorage.getItem(key);
     return raw ? JSON.parse(raw) : fallback;
   }catch(e){ return fallback; }
 }
+// Versi async: ambil langsung dari server Firestore (dipakai saat data belum tentu ada di cache lokal browser ini, mis. login pertama kali di device baru)
+async function fetchDB(key, fallback){
+  try{
+    const snap = await kvDoc(key).get();
+    if(snap.exists){
+      const val = snap.data().value;
+      try{ localStorage.setItem(key, JSON.stringify(val)); }catch(e){}
+      return val;
+    }
+    return loadDB(key, fallback);
+  }catch(e){
+    return loadDB(key, fallback); // offline / gagal -> pakai cache lokal
+  }
+}
 function saveDB(key, val){
   try{ localStorage.setItem(key, JSON.stringify(val)); }catch(e){ toast('Gagal menyimpan data (penyimpanan penuh?)', true); }
+  kvDoc(key).set({ value: val, updatedAt: Date.now() }).catch(err=>{
+    toast('Gagal sinkron ke server: '+err.message, true);
+  });
 }
+function deleteDBKey(key){
+  try{ localStorage.removeItem(key); }catch(e){}
+  kvDoc(key).delete().catch(()=>{});
+}
+
+// Dengarkan perubahan realtime pada satu key (mis. dari device/kasir lain), lalu jalankan callback dengan nilai terbaru.
+// trackList opsional: array penampung fungsi unsubscribe (dipakai supaya langganan per-UMKM bisa dibersihkan saat ganti toko/logout,
+// sementara langganan global seperti daftar UMKM & brand tetap hidup selama app terbuka).
+function watchKey(key, onChange, trackList){
+  const unsub = kvDoc(key).onSnapshot(snap=>{
+    if(!snap.exists) return;
+    const val = snap.data().value;
+    try{ localStorage.setItem(key, JSON.stringify(val)); }catch(e){}
+    onChange(val);
+  }, err=>{ console.error('watchKey error', key, err); });
+  if(trackList) trackList.push(unsub);
+  return unsub;
+}
+const _umkmSubUnsubscribers = [];
+function clearUmkmSubscriptions(){
+  while(_umkmSubUnsubscribers.length){ _umkmSubUnsubscribers.pop()(); }
+}
+
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
 
 let categories = [];
@@ -1063,20 +1126,23 @@ window.addEventListener('hashchange', route);
 
 /* ---- Login / Logout UMKM (pemilik toko ATAU pegawai) ---- */
 function loadPegawaiForUmkm(umkmId){ return loadDB('kasir_pegawai_'+umkmId, []); }
-function findPegawaiLogin(username, password){
-  const umkms = loadUmkms();
+async function findPegawaiLogin(username, password){
+  const umkms = await fetchDB(GLOBAL_KEYS.umkms, []);
   for(const u of umkms){
-    const list = loadPegawaiForUmkm(u.id);
+    const list = await fetchDB('kasir_pegawai_'+u.id, []);
     const found = list.find(p=>p.username===username && p.password===password && p.active!==false);
     if(found) return { umkmId:u.id, pegawai:found };
   }
   return null;
 }
-function umkmLogin(){
+// Login diambil langsung dari server (bukan cache lokal) supaya bisa login dari device mana pun, bukan cuma device yang pernah dipakai sebelumnya
+async function umkmLogin(){
   const user = document.getElementById('umkmLoginUser').value.trim();
   const pass = document.getElementById('umkmLoginPass').value;
   const errEl = document.getElementById('umkmLoginError');
-  const foundOwner = loadUmkms().find(u=>u.username===user && u.password===pass);
+  errEl.textContent = 'Memeriksa akun...';
+  const umkms = await fetchDB(GLOBAL_KEYS.umkms, []);
+  const foundOwner = umkms.find(u=>u.username===user && u.password===pass);
   if(foundOwner){
     errEl.textContent = '';
     setSession({ role:'umkm', umkmId:foundOwner.id });
@@ -1084,7 +1150,7 @@ function umkmLogin(){
     route();
     return;
   }
-  const foundEmp = findPegawaiLogin(user, pass);
+  const foundEmp = await findPegawaiLogin(user, pass);
   if(foundEmp){
     errEl.textContent = '';
     setSession({ role:'pegawai', umkmId:foundEmp.umkmId, pegawaiId:foundEmp.pegawai.id });
@@ -1099,17 +1165,19 @@ function umkmLogout(){
   if(session && session.role==='admin'){ // admin sedang mengintip toko, kembalikan ke dashboard admin
     backToAdminDashboard(); return;
   }
+  clearUmkmSubscriptions();
   clearSession();
   location.hash = '';
   route();
 }
 
 /* ---- Login / Logout Admin ---- */
-function adminLogin(){
+async function adminLogin(){
   const user = document.getElementById('adminLoginUser').value.trim();
   const pass = document.getElementById('adminLoginPass').value;
   const errEl = document.getElementById('adminLoginError');
-  const cred = loadAdminCred();
+  errEl.textContent = 'Memeriksa akun...';
+  const cred = await fetchDB(GLOBAL_KEYS.adminCred, { username:'admin', password:'admin123' });
   if(user!==cred.username || pass!==cred.password){ errEl.textContent = 'Username atau password salah'; return; }
   errEl.textContent = '';
   setSession({ role:'admin' });
@@ -1122,6 +1190,7 @@ function adminLogout(){
   route();
 }
 function backToAdminDashboard(){
+  clearUmkmSubscriptions();
   setSession({ role:'admin' });
   location.hash = 'admin';
   route();
@@ -1209,7 +1278,7 @@ function deleteUmkm(id){
   if(!confirm('Hapus UMKM ini beserta seluruh data produk, kategori, dan transaksinya? Tindakan ini tidak bisa dibatalkan.')) return;
   let list = loadUmkms().filter(x=>x.id!==id);
   saveUmkms(list);
-  ['kasir_products_','kasir_categories_','kasir_trx_','kasir_settings_','kasir_pegawai_','kasir_pengeluaran_'].forEach(prefix=> localStorage.removeItem(prefix+id));
+  ['kasir_products_','kasir_categories_','kasir_trx_','kasir_settings_','kasir_pegawai_','kasir_pengeluaran_'].forEach(prefix=> deleteDBKey(prefix+id));
   renderUmkmTable();
   toast('UMKM dihapus');
 }
@@ -1289,6 +1358,40 @@ function startPosApp(umkmId, viaAdmin, role, pegawaiId){
   renderProdGrid();
   renderCart();
   posAppStarted = true;
+  subscribeToUmkmRealtime(umkmId);
+}
+/* Dengarkan perubahan data toko ini secara realtime (dari kasir/device lain) dan render ulang tampilan yang relevan */
+function subscribeToUmkmRealtime(umkmId){
+  clearUmkmSubscriptions();
+  watchKey(DB_KEYS.categories, val=>{
+    categories = val;
+    renderCategoryChips(); renderProdGrid();
+    if(typeof renderKategoriTable==='function') renderKategoriTable();
+  }, _umkmSubUnsubscribers);
+  watchKey(DB_KEYS.products, val=>{
+    products = val;
+    renderProdGrid();
+    if(typeof renderProdukTable==='function') renderProdukTable();
+  }, _umkmSubUnsubscribers);
+  watchKey(DB_KEYS.trx, val=>{
+    trx = val;
+    if(typeof renderRiwayat==='function') renderRiwayat();
+    if(typeof renderLaporan==='function') renderLaporan();
+  }, _umkmSubUnsubscribers);
+  watchKey(DB_KEYS.settings, val=>{
+    settings = val;
+    document.getElementById('storeNameLabel').textContent = settings.storeName;
+    applyUmkmBrandingToSidebar();
+    if(typeof renderQrisSvg==='function') renderQrisSvg();
+  }, _umkmSubUnsubscribers);
+  watchKey(DB_KEYS.pegawai, val=>{
+    pegawaiList = val;
+    if(typeof renderPegawaiTable==='function') renderPegawaiTable();
+  }, _umkmSubUnsubscribers);
+  watchKey(DB_KEYS.pengeluaran, val=>{
+    pengeluaranList = val;
+    if(typeof renderPengeluaranTable==='function') renderPengeluaranTable();
+  }, _umkmSubUnsubscribers);
 }
 function applyRoleRestrictions(role, pegawaiId){
   const isOwner = (role==='umkm' || role==='admin');
@@ -2230,12 +2333,12 @@ document.getElementById('importFile').addEventListener('change', function(e){
 });
 function resetAllData(){
   if(!confirm('Semua produk, kategori, riwayat transaksi, pengeluaran, dan akun pegawai akan dihapus permanen. Lanjutkan?')) return;
-  localStorage.removeItem(DB_KEYS.products);
-  localStorage.removeItem(DB_KEYS.categories);
-  localStorage.removeItem(DB_KEYS.trx);
-  localStorage.removeItem(DB_KEYS.settings);
-  localStorage.removeItem(DB_KEYS.pegawai);
-  localStorage.removeItem(DB_KEYS.pengeluaran);
+  deleteDBKey(DB_KEYS.products);
+  deleteDBKey(DB_KEYS.categories);
+  deleteDBKey(DB_KEYS.trx);
+  deleteDBKey(DB_KEYS.settings);
+  deleteDBKey(DB_KEYS.pegawai);
+  deleteDBKey(DB_KEYS.pengeluaran);
   location.reload();
 }
 
@@ -2252,6 +2355,14 @@ document.querySelectorAll('.overlay').forEach(ov=>{
 /* ============================================================
    INIT
 ============================================================ */
+// Langganan global (aktif selama app terbuka): daftar UMKM & brand aplikasi, dipakai dashboard admin realtime
+watchKey(GLOBAL_KEYS.umkms, val=>{
+  if(document.getElementById('adminRoot').style.display !== 'none'){ renderUmkmTable(); }
+});
+watchKey(GLOBAL_KEYS.brand, val=>{
+  applyBrandToLoginScreens();
+  if(document.getElementById('adminRoot').style.display !== 'none'){ loadBrandForm(); }
+});
 route();
 </script>
 </body>
