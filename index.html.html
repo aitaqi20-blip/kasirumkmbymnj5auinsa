@@ -6,6 +6,7 @@
 <title>Kasir UMKM</title>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
 <style>
   :root{
     --navy:#0f2748;
@@ -937,6 +938,10 @@ firebase.initializeApp(firebaseConfig);
 const fsdb = firebase.firestore();
 // Cache offline: kalau koneksi putus, app tetap bisa dibuka & baca data terakhir
 try{ fsdb.enablePersistence({ synchronizeTabs:true }); }catch(e){ /* sudah aktif di tab lain / browser tak dukung, abaikan */ }
+
+/* Autentikasi anonim: supaya setiap baca/tulis ke Firestore punya request.auth != null,
+   sehingga Security Rules bisa dibuat lebih ketat (tidak lagi "allow read, write: if true"). */
+const fauth = firebase.auth();
 
 /* ============================================================
    STORAGE
@@ -2356,14 +2361,34 @@ document.querySelectorAll('.overlay').forEach(ov=>{
    INIT
 ============================================================ */
 // Langganan global (aktif selama app terbuka): daftar UMKM & brand aplikasi, dipakai dashboard admin realtime
-watchKey(GLOBAL_KEYS.umkms, val=>{
-  if(document.getElementById('adminRoot').style.display !== 'none'){ renderUmkmTable(); }
+function initGlobalWatchers(){
+  watchKey(GLOBAL_KEYS.umkms, val=>{
+    if(document.getElementById('adminRoot').style.display !== 'none'){ renderUmkmTable(); }
+  });
+  watchKey(GLOBAL_KEYS.brand, val=>{
+    applyBrandToLoginScreens();
+    if(document.getElementById('adminRoot').style.display !== 'none'){ loadBrandForm(); }
+  });
+}
+
+// Pastikan app baru mulai (route() + langganan realtime) setelah proses auth selesai,
+// tapi jangan sampai macet selamanya kalau auth gagal/lambat (mis. offline) — tetap jalan pakai cache lokal.
+let _appStarted = false;
+function startAppOnce(){
+  if(_appStarted) return;
+  _appStarted = true;
+  initGlobalWatchers();
+  route();
+}
+fauth.onAuthStateChanged(user=>{
+  if(user) startAppOnce();
 });
-watchKey(GLOBAL_KEYS.brand, val=>{
-  applyBrandToLoginScreens();
-  if(document.getElementById('adminRoot').style.display !== 'none'){ loadBrandForm(); }
+fauth.signInAnonymously().catch(err=>{
+  console.error('Gagal autentikasi anonim:', err);
+  toast('Gagal terhubung ke server: '+err.message, true);
+  startAppOnce();
 });
-route();
+setTimeout(startAppOnce, 4000); // jaga-jaga kalau auth macet/lambat
 </script>
 </body>
 </html>
