@@ -388,7 +388,7 @@
 <!-- ===== ADMIN DASHBOARD (akses penuh: kelola semua akun UMKM) ===== -->
 <div id="adminRoot" style="display:none;">
   <div id="appAdmin">
-    <div class="sidebar">
+    <div class="sidebar" id="adminSidebar">
       <div class="brand" style="display:flex;align-items:center;gap:10px;">
         <div class="sidebar-logo" id="adminSidebarLogo">🏪</div>
         <div>
@@ -407,6 +407,7 @@
     </div>
     <div class="main">
       <div class="topbar">
+        <button class="btn btn-outline btn-sm mobile-topbtn" onclick="toggleAdminSidebar()">&#9776;</button>
         <div><h1 id="adminPageTitle">Daftar UMKM</h1><div class="sub" id="adminPageSub">Tambah akun UMKM baru & kelola akses penuh setiap toko</div></div>
       </div>
       <div class="view active" id="aview-umkm">
@@ -1213,6 +1214,7 @@ function switchAdminView(v){
   document.getElementById('aview-'+v).classList.add('active');
   document.getElementById('adminPageTitle').textContent = v==='umkm' ? 'Daftar UMKM' : 'Brand Aplikasi';
   document.getElementById('adminPageSub').textContent = v==='umkm' ? 'Tambah akun UMKM baru & kelola akses penuh setiap toko' : 'Nama & logo ini tampil di semua halaman login dan sidebar';
+  document.getElementById('adminSidebar').classList.remove('open');
 }
 function renderUmkmTable(){
   const list = loadUmkms();
@@ -1447,6 +1449,7 @@ function toast(msg, isErr){
 function closeModal(id){ document.getElementById(id).classList.remove('active'); }
 function openModal(id){ document.getElementById(id).classList.add('active'); }
 function toggleSidebar(){ document.getElementById('sidebar').classList.toggle('open'); }
+function toggleAdminSidebar(){ document.getElementById('adminSidebar').classList.toggle('open'); }
 
 /* ============================================================
    NAVIGATION
